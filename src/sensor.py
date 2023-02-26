@@ -1,4 +1,5 @@
 import re
+import platform
 import subprocess
 
 def str2float(str)-> float:
@@ -33,7 +34,7 @@ def getIpmiTemps(sensors: list):
         for line in sensors_raw.stdout.decode('UTF-8').splitlines():
             rm = rx.match(line)
 
-            if len(rm.groups()) >= 10:
+            if rm is not None and len(rm.groups()) >= 10:
                 name = rm.group(1).strip()
                 value = str2float(rm.group(2).strip())
                 unit = rm.group(3).strip()
@@ -66,31 +67,91 @@ def getIpmiTemps(sensors: list):
     return sensor_values
 
 def getDisks():
-    command = ['fdisk', '-l']
-    grep_disks = ['grep', '-e', 'Disk /dev/\w*:']
-
     disks = []
-    # Actually get sensor info
+    disks_data = []
+
+    # Get list of disks connected to the system
+    if platform.system() == 'Linux':                        # TrueNAS SCALE / Linux
+        command = ['fdisk', '-l']
+        grep_disks = ['grep', '-e', 'Disk /dev/\w*:']
+
+        # Actually get disk info
+        try:
+            # Run commands
+            ps = subprocess.Popen(command, stdout=subprocess.PIPE)
+            disks_raw = subprocess.run(grep_disks, stdin=ps.stdout, check=False, capture_output=True)
+
+            # Parse output
+            rx = re.compile(r'Disk \/dev\/(.*)\:')
+            for disk in disks_raw.stdout.decode('UTF-8').splitlines():
+                rm = rx.match(disk)
+
+                if rm is not None and len(rm.groups()) > 0:
+                    disks.append(rm.group(1).strip())
+
+        except Exception as e:
+            print('ERROR: {}'.format(e))
+    elif platform.system() == 'FreeBSD':                    # TrueNAS CORE / FreeBSD
+        command = ['sysctl', '-n', 'kern.disks']
+
+        # Actually get disk info
+        try:
+            disks_raw = subprocess.run(command, check=False, capture_output=True)
+
+            # Parse output
+            for disk in disks_raw.stdout.decode('UTF-8').split():
+                disks.append(disk)
+
+        except Exception as e:
+            print('ERROR: {}'.format(e))
+    else:
+        print('ERROR: Unsupported OS ({})'.format(platform.system()))
+
+    # Get disk temperatures from SMART values
     try:
-        # Run commands
-        ps = subprocess.Popen(command, stdout=subprocess.PIPE)
-        disks_raw = subprocess.run(grep_disks, stdin=ps.stdout, check=False, capture_output=True)
+        smart_command = ['smartctl', '-A']
+        for disk in disks:
+            smart_raw = subprocess.run(smart_command + ['/dev/' + disk], check=False, capture_output=True).stdout.decode('UTF-8')
 
-        # Parse output
-        rx = re.compile(r'Disk \/dev\/(.*)\:')
-        for line in disks_raw.stdout.decode('UTF-8').splitlines():
-            rm = rx.match(line)
+            # Get temperature from SMART data
+            # Try #1: Get temperature information from attribute #194
+            rx = re.compile(r'^194 .* \s(\d*)\s?.*')
+            rm = None
+            for line in smart_raw.splitlines():
+                rm = rx.match(line)
+                if rm is not None:
+                    break
 
-            if len(rm.groups()) > 0:
-                disks.append(rm.group(1).strip())
+            # Fallback -> Try #2: Get temperature information from attribute #190
+            if rm is None:
+                rx = re.compile(r'^190 .* \s(\d*)\s?.*')
+                for line in smart_raw.splitlines():
+                    rm = rx.match(line)
+                    if rm is not None:
+                        break
 
+            # Fallback -> Try #3: Get temperature from attribute name (could be multiple -> first is chosen)
+            if rm is None:
+                rx = re.compile(r'[Tt]emperature.* \s(\d*)\s?.*')
+                for line in smart_raw.splitlines():
+                    rm = rx.match(line)
+                    if rm is not None:
+                        break
+
+            # Compile disk temperature data
+            if rm is not None and len(rm.groups()) > 0:
+                disks_data.append(
+                    {
+                        'name': disk,
+                        'temperature': rm.group(1)
+                    }
+                )
     except Exception as e:
         print('ERROR: {}'.format(e))
 
-    return disks
+    return disks_data
 
 if __name__ == '__main__':
-
     print('Zone1 Temperatures')
     print(getIpmiTemps(['CPU', 'NVMe']))
 
