@@ -1,4 +1,5 @@
 import re
+import math
 import platform
 import subprocess
 
@@ -48,7 +49,7 @@ def getIpmiTemps(sensors: list):
 
                 sensor_value = {
                     'name': name,
-                    'value': value,
+                    'temperature': value,
                     'unit': unit,
                     'status': status,
                     'lnr': lnr,
@@ -66,7 +67,7 @@ def getIpmiTemps(sensors: list):
 
     return sensor_values
 
-def getDisks():
+def getDisks(parseLimits=False, defaultLimits=[10.0, 60.0]):
     disks = []
     disks_data = []
 
@@ -107,45 +108,96 @@ def getDisks():
     else:
         print('ERROR: Unsupported OS ({})'.format(platform.system()))
 
-    # Get disk temperatures from SMART values
+    # Get disk temperatures from SMART data
     try:
-        smart_command = ['smartctl', '-A']
+        if parseLimits:
+            smart_command = ['smartctl', '-x']
+        else:
+            smart_command = ['smartctl', '-A']
+
+        rx_temp = [
+            re.compile(r'^194 .* \s(\d*)\s?.*'),            # Try #1: Get temperature information from attribute #194
+            re.compile(r'^190 .* \s(\d*)\s?.*'),            # Fallback -> Try #2: Get temperature information from attribute #190
+            re.compile(r'[Tt]emperature.* \s(\d*)\s?.*')    # Fallback -> Try #3: Get temperature from attribute name (could be multiple -> first is chosen)
+        ]
+        rx_unit = [
+            re.compile(r'.*(Celsius|Fahrenheit).*'),
+            re.compile(r'.*(Cel|Fah).*')                    # Workaround for Samsung
+        ]
+        rx_max = re.compile(r'.*(Warning  Comp. Temp. Threshold|Specified Maximum Operating Temperature).*')
+        rx_min = re.compile(r'.*(Specified Minimum Operating Temperature).*')
+        rx_value = re.compile(r'.*\b(\d+)\b.*')
+
+        # Parse output for each disk
         for disk in disks:
             smart_raw = subprocess.run(smart_command + ['/dev/' + disk], check=False, capture_output=True).stdout.decode('UTF-8')
 
-            # Get temperature from SMART data
-            # Try #1: Get temperature information from attribute #194
-            rx = re.compile(r'^194 .* \s(\d*)\s?.*')
-            rm = None
-            for line in smart_raw.splitlines():
-                rm = rx.match(line)
-                if rm is not None:
+            temp = float('NaN')
+            unit = 'N/A'
+            lnr = defaultLimits[0]
+            lcr = defaultLimits[0]
+            lnc = defaultLimits[0]
+            unc = defaultLimits[1]
+            ucr = defaultLimits[1]
+            unr = defaultLimits[1]
+
+            # Temperature data
+            for rxt in rx_temp:
+                for line in smart_raw.splitlines():
+                    rmt = rxt.match(line)
+                    if rmt is not None and len(rmt.groups()) > 0:
+                        temp = float(rmt.group(1))
+                        for rxu in rx_unit:
+                            rmu = rxu.match(line)
+                            if rmu is not None and len(rmu.groups()) > 0:
+                                unit = rmu.group(1)
+                                break
+                        break
+                if not math.isnan(temp):
                     break
 
-            # Fallback -> Try #2: Get temperature information from attribute #190
-            if rm is None:
-                rx = re.compile(r'^190 .* \s(\d*)\s?.*')
-                for line in smart_raw.splitlines():
-                    rm = rx.match(line)
-                    if rm is not None:
-                        break
+            unit = re.sub(r"\b[Cc]el\b", "Celsius", unit)
+            unit = re.sub(r"\b[Ff]ah\b", "Fahrenheit", unit)
 
-            # Fallback -> Try #3: Get temperature from attribute name (could be multiple -> first is chosen)
-            if rm is None:
-                rx = re.compile(r'[Tt]emperature.* \s(\d*)\s?.*')
+            # Limits
+            if parseLimits:
                 for line in smart_raw.splitlines():
-                    rm = rx.match(line)
-                    if rm is not None:
-                        break
+                    rm_max_line = rx_max.match(line)
+                    if rm_max_line is not None and len(rm_max_line.groups()) > 0:
+                        rm_max_value = rx_value.match(line)
+                        if rm_max_value is not None and len(rm_max_value.groups()) > 0:
+                            try:
+                                unc = float(rm_max_value.group(1))
+                                ucr = unc
+                                unr = unc
+                            except:
+                                pass
+                    else:
+                        rm_min_line = rx_min.match(line)
+                        if rm_min_line is not None and len(rm_min_line.groups()) > 0:
+                            rm_min_value = rx_value.match(line)
+                            if rm_min_value is not None and len(rm_min_value.groups()) > 0:
+                                try:
+                                    lnc = float(rm_min_value.group(1))
+                                    lcr = lnc
+                                    lnr = lnc
+                                except:
+                                    pass
 
-            # Compile disk temperature data
-            if rm is not None and len(rm.groups()) > 0:
-                disks_data.append(
-                    {
-                        'name': disk,
-                        'temperature': rm.group(1)
-                    }
-                )
+            disks_data.append(
+                {
+                    'name': disk,
+                    'temperature': temp,
+                    'unit': unit,
+                    'status': 'OK' if not math.isnan(temp) else 'FAIL',
+                    'lnr': lnr,
+                    'lcr': lcr,
+                    'lnc': lnc,
+                    'unc': unc,
+                    'ucr': ucr,
+                    'unr': unr
+                }
+            )
     except Exception as e:
         print('ERROR: {}'.format(e))
 
@@ -153,10 +205,31 @@ def getDisks():
 
 if __name__ == '__main__':
     print('Zone1 Temperatures')
-    print(getIpmiTemps(['CPU', 'NVMe']))
+    sensors_1 = getIpmiTemps(['CPU'])
+    for sensor in sensors_1:
+        for key in sensor.keys():
+            print(sensor[key], end='')
+            if key != list(sensor.keys())[-1]:
+                print(' ', end='')
+        print()
+    print()
 
     print('Zone2 Temperatures')
-    print(getIpmiTemps(['VRM', 'DIMM']))
+    sensors_2 = getIpmiTemps(['VRM', 'DIMM', 'NVMe', 'PCH', 'Peripheral', 'System'])
+    for sensor in sensors_2:
+        for key in sensor.keys():
+            print(sensor[key], end='')
+            if key != list(sensor.keys())[-1]:
+                print(' ', end='')
+        print()
+    print()
 
     print('Disks')
-    print(getDisks())
+    disks = getDisks()
+    for disk in disks:
+        print('/dev/', end='')
+        for key in disk.keys():
+            print(disk[key], end='')
+            if key != list(disk.keys())[-1]:
+                print(' ', end='')
+        print()
