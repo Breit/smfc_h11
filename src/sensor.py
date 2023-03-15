@@ -67,23 +67,22 @@ def getIpmiTemps(sensors: list):
 
     return sensor_values
 
+# TODO: Differentiate limits between SSD and HDD
 def getDisks(parseLimits=False, defaultLimits=[10.0, 60.0]):
     disks = []
     disks_data = []
 
     # Get list of disks connected to the system
     if platform.system() == 'Linux':                        # TrueNAS SCALE / Linux
-        command = ['fdisk', '-l']
-        grep_disks = ['grep', '-e', 'Disk /dev/\w*:']
+        command = ['lsblk', '-nido', 'KNAME,MODEL']         # TODO: evaluate type ROTA: 0 -> SSD, 1 -> HDD
 
         # Actually get disk info
         try:
             # Run commands
-            ps = subprocess.Popen(command, stdout=subprocess.PIPE)
-            disks_raw = subprocess.run(grep_disks, stdin=ps.stdout, check=False, capture_output=True)
+            disks_raw = subprocess.run(command, check=False, capture_output=True)
 
-            # Parse output
-            rx = re.compile(r'Disk \/dev\/(.*)\:')
+            # Parse command output
+            rx = re.compile(r'^(\w*)\s+\w.+')
             for disk in disks_raw.stdout.decode('UTF-8').splitlines():
                 rm = rx.match(disk)
 
@@ -93,13 +92,13 @@ def getDisks(parseLimits=False, defaultLimits=[10.0, 60.0]):
         except Exception as e:
             print('ERROR: {}'.format(e))
     elif platform.system() == 'FreeBSD':                    # TrueNAS CORE / FreeBSD
-        command = ['sysctl', '-n', 'kern.disks']
+        command = ['sysctl', '-n', 'kern.disks']            # TODO: find a way to get device type (HDD/SSD) on FreeBSD
 
         # Actually get disk info
         try:
             disks_raw = subprocess.run(command, check=False, capture_output=True)
 
-            # Parse output
+            # Parse command output
             for disk in disks_raw.stdout.decode('UTF-8').split():
                 disks.append(disk)
 
