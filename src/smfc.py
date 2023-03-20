@@ -382,7 +382,7 @@ class Sensor:
         return max(min(r, 1.0), 0.0) if r else 1.0
 
     @staticmethod
-    def getIpmiTemps(ipmitool_path: str, sensor_spec: list, sensor_limits: Union(List[float], None) = None):
+    def getIpmiTemps(ipmitool_path: str, sensor_spec: List[str], sensor_limits: Union[List[float], None] = None):
         """
         Get sensor list based on sensor_spec list from IPMI
         If sensor_limits is provided, it overwrites the IPMI limits
@@ -632,6 +632,7 @@ class FanController:
     CALC_MIN: int = 0
     CALC_AVG: int = 1
     CALC_MAX: int = 2
+    CALC_ONE: int = 3
 
     # Error messages.
     ERROR_MSG_FILE_IO: str = 'Cannot read file ({}).'
@@ -685,8 +686,6 @@ class FanController:
         if self.ipmi_zone not in {Ipmi.CPU_ZONE, Ipmi.HD_ZONE}:
             raise ValueError('invalid value: ipmi_zone')
         self.name = name
-        if self.count <= 0:
-            raise ValueError('count <= 0')
         self.temp_calc = temp_calc
         if self.temp_calc not in {self.CALC_MIN, self.CALC_AVG, self.CALC_MAX}:
             raise ValueError('invalid value: temp_calc')
@@ -707,14 +706,16 @@ class FanController:
         self.max_level = max_level
 
         # Set the proper temperature function.
-        if self.count == 1:
+        if self.temp_calc == self.CALC_MIN:
+            self.get_temp_func = self.get_min_temp
+        elif self.temp_calc == self.CALC_MAX:
+            self.get_temp_func = self.get_max_temp
+        elif self.temp_calc == self.CALC_AVG:
+            self.get_temp_func = self.get_avg_temp
+        elif self.temp_calc == self.CALC_ONE:
             self.get_temp_func = self.get_1_temp
         else:
             self.get_temp_func = self.get_avg_temp
-            if self.temp_calc == self.CALC_MIN:
-                self.get_temp_func = self.get_min_temp
-            elif self.temp_calc == self.CALC_MAX:
-                self.get_temp_func = self.get_max_temp
 
         # Initialize calculated and measured values.
         self.temp_step = 1.0 / steps
@@ -727,8 +728,6 @@ class FanController:
         if self.log.log_level >= self.log.LOG_DEBUG:
             self.log.msg(self.log.LOG_DEBUG, f'{self.name} fan controller was initialized with:')
             self.log.msg(self.log.LOG_DEBUG, f'   IPMI zone = {self.ipmi_zone}')
-            self.log.msg(self.log.LOG_DEBUG, f'   count = {self.count}')
-            self.log.msg(self.log.LOG_DEBUG, f'   temp_calc = {self.temp_calc}')
             self.log.msg(self.log.LOG_DEBUG, f'   steps = {self.steps}')
             self.log.msg(self.log.LOG_DEBUG, f'   sensitivity = {self.sensitivity}')
             self.log.msg(self.log.LOG_DEBUG, f'   polling = {self.polling}')
@@ -824,6 +823,9 @@ class FanController:
 
         try:
             self.update_sensors()
+            print('SensorCount:', len(self.sensors))
+            for sensor in self.sensors:
+                print(sensor.name, sensor.value)
             if len(self.sensors) > 0:
                 name: str
                 temp: float
@@ -831,6 +833,9 @@ class FanController:
                 for sensor in self.sensors:
                     if math.isnan(value):
                         value = sensor.getRelTemp()
+                        if (math.isnan(value)):
+                            print('NaN')
+                            continue
                         name = sensor.name
                         temp = sensor.temperature
                         unit = sensor.unit
@@ -882,6 +887,8 @@ class FanController:
 
         # Step 2: read temperature and sensitivity gap.
         current_temp = self.get_temp_func()
+        if (math.isnan(current_temp)):
+            print(f'ERROR: current_temp = {current_temp}')
         if abs(current_temp - self.last_temp) < self.sensitivity:
             return
         self.last_temp = current_temp
@@ -920,7 +927,7 @@ class CpuZone(FanController):
 
         # Initialize sensors
         self.sensor_spec = config[self.CPU_ZONE_TAG].get('sensor_spec')
-        self.ipmitool_path = config['Paths'].getfloat('ipmitool_path', fallback='/usr/bin/ipmitool')
+        self.ipmitool_path = config['Paths'].get('ipmitool_path', fallback='/usr/bin/ipmitool')
         self.limits = [
             config[self.CPU_ZONE_TAG].getfloat('min_temp', fallback=None),
             config[self.CPU_ZONE_TAG].getfloat('max_temp', fallback=None)
@@ -970,8 +977,8 @@ class HdZone(FanController):
 
         # Initialize sensors
         self.sensor_spec = config[self.HD_ZONE_TAG].get('sensor_spec')
-        self.ipmitool_path = config['Paths'].getfloat('ipmitool_path', fallback='/usr/bin/ipmitool')
-        self.smartctl_path = config['Paths'].getfloat('smartctl_path', fallback='/usr/bin/smartctl')
+        self.ipmitool_path = config['Paths'].get('ipmitool_path', fallback='/usr/bin/ipmitool')
+        self.smartctl_path = config['Paths'].get('smartctl_path', fallback='/usr/bin/smartctl')
         self.limits = [
             config[self.HD_ZONE_TAG].getfloat('min_temp', fallback=None),
             config[self.HD_ZONE_TAG].getfloat('max_temp', fallback=None)
@@ -1000,14 +1007,12 @@ class HdZone(FanController):
             config[self.HD_ZONE_TAG].getint('max_level', fallback=100)
         )
 
-        # Print configuration in DEBUG log level (or higher).
-        if self.log.log_level >= self.log.LOG_DEBUG:
-            self.log.msg(self.log.LOG_DEBUG, f'   hd_names = {self.hd_device_names}')
-
     def update_sensors(self) -> None:
+        print('HD')
         self.sensors = \
             Sensor.getIpmiTemps(self.ipmitool_path, self.sensor_spec, self.limits) + \
             Sensor.getDiskTemps(self.smartctl_path, self.parse_limits, self.limits_hdd, self.limits_ssd)
+        print(self.sensors.count())
 
 def main():
     """
