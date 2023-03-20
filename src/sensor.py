@@ -2,6 +2,7 @@ import re
 import math
 import platform
 import subprocess
+import xml.etree.ElementTree as ET
 
 def str2float(str)-> float:
     try:
@@ -67,43 +68,72 @@ def getIpmiTemps(sensors: list):
 
     return sensor_values
 
-# TODO: Differentiate limits between SSD and HDD
 def getDisks(parseLimits=False, defaultLimits=[10.0, 60.0]):
-    disks = []
-    disks_data = []
-
-    # Get list of disks connected to the system
-    if platform.system() == 'Linux':                        # TrueNAS SCALE / Linux
-        command = ['lsblk', '-nido', 'KNAME,MODEL']         # TODO: evaluate type ROTA: 0 -> SSD, 1 -> HDD
-
-        # Actually get disk info
+    def getDisks_FreeBSD():
         try:
-            # Run commands
-            disks_raw = subprocess.run(command, check=False, capture_output=True)
+            disks = []
+            command = ['sysctl', '-n', 'kern.geom.confxml']
 
-            # Parse command output
-            rx = re.compile(r'^(\w*)\s+\w.+')
-            for disk in disks_raw.stdout.decode('UTF-8').splitlines():
-                rm = rx.match(disk)
+            # Get disk info from GEOM
+            geom_confxml_raw = subprocess.run(command, check=False, capture_output=True)
+            geom_tree = ET.ElementTree(ET.fromstring(geom_confxml_raw.stdout.decode('UTF-8')))
 
-                if rm is not None and len(rm.groups()) > 0:
-                    disks.append(rm.group(1).strip())
+            disk_tree = geom_tree.getroot().findall('.//class[name="DISK"]//provider')
+            for disk in disk_tree:
+                disks.append(
+                    {
+                        'name': disk.find('.//name').text,
+                        'type': 'SSD' if disk.find('.//config/rotationrate').text == '0' else 'HDD'
+                    }
+                )
+        except:     # Fallback to only report disk names (without type) if parsing GEOM XML goes wrong
+            disks = []
+            command = ['sysctl', '-n', 'kern.disks']
 
-        except Exception as e:
-            print('ERROR: {}'.format(e))
-    elif platform.system() == 'FreeBSD':                    # TrueNAS CORE / FreeBSD
-        command = ['sysctl', '-n', 'kern.disks']            # TODO: find a way to get device type (HDD/SSD) on FreeBSD
-
-        # Actually get disk info
-        try:
+            # Actually get disk info
             disks_raw = subprocess.run(command, check=False, capture_output=True)
 
             # Parse command output
             for disk in disks_raw.stdout.decode('UTF-8').split():
-                disks.append(disk)
+                disks.append(
+                    {
+                        'name': disk,
+                        'type': 'Unknown'
+                    }
+                )
 
-        except Exception as e:
-            print('ERROR: {}'.format(e))
+        return disks
+
+    def getDisks_Linux():
+        disks = []
+
+        command = ['lsblk', '-nido', 'KNAME,ROTA,MODEL']
+
+        # Actually get disk info
+        disks_raw = subprocess.run(command, check=False, capture_output=True)
+
+        # Parse command output
+        rx = re.compile(r'^(\w*)[ \t]\s+(\d)[ \t]\w.+')
+        for disk in disks_raw.stdout.decode('UTF-8').splitlines():
+            rm = rx.match(disk)
+
+            if rm is not None and len(rm.groups()) > 1:
+                disks.append(
+                    {
+                        'name': rm.group(1).strip(),
+                        'type': 'SSD' if rm.group(2).strip() == '0' else 'HDD'
+                    }
+                )
+
+        return disks
+
+    disks = []
+
+    # Get list of disks connected to the system
+    if platform.system() == 'Linux':                        # TrueNAS SCALE / Linux
+        disks = getDisks_Linux()
+    elif platform.system() == 'FreeBSD':                    # TrueNAS CORE / FreeBSD
+        disks = getDisks_FreeBSD()
     else:
         print('ERROR: Unsupported OS ({})'.format(platform.system()))
 
@@ -129,7 +159,7 @@ def getDisks(parseLimits=False, defaultLimits=[10.0, 60.0]):
 
         # Parse output for each disk
         for disk in disks:
-            smart_raw = subprocess.run(smart_command + ['/dev/' + disk], check=False, capture_output=True).stdout.decode('UTF-8')
+            smart_raw = subprocess.run(smart_command + ['/dev/' + disk['name']], check=False, capture_output=True).stdout.decode('UTF-8')
 
             temp = float('NaN')
             unit = 'N/A'
@@ -183,24 +213,20 @@ def getDisks(parseLimits=False, defaultLimits=[10.0, 60.0]):
                                 except:
                                     pass
 
-            disks_data.append(
-                {
-                    'name': disk,
-                    'temperature': temp,
-                    'unit': unit,
-                    'status': 'OK' if not math.isnan(temp) else 'FAIL',
-                    'lnr': lnr,
-                    'lcr': lcr,
-                    'lnc': lnc,
-                    'unc': unc,
-                    'ucr': ucr,
-                    'unr': unr
-                }
-            )
+            disk['temperature'] = temp
+            disk['unit'] = unit
+            disk['status'] = 'OK' if not math.isnan(temp) else 'FAIL'
+            disk['lnr'] = lnr
+            disk['lcr'] = lcr
+            disk['lnc'] = lnc
+            disk['unc'] = unc
+            disk['ucr'] = ucr
+            disk['unr'] = unr
+
     except Exception as e:
         print('ERROR: {}'.format(e))
 
-    return disks_data
+    return disks
 
 if __name__ == '__main__':
     print('Zone1 Temperatures')
