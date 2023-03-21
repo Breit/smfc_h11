@@ -353,11 +353,12 @@ class Sensor:
     ucr: float              # upper critical temperature
     unr: float              # upper non-recoverable temperature
     type: str               # optional type
+    ref_target: float       # relative target temperature
 
     def __init__(
         self, name: str, temperature: float, unit: str, status: str,
         lnr: float, lcr: float, lnc: float, unc: float, ucr: float, unr: float,
-        type: str = None
+        ref_target: float, type: str = None
     ) -> None:
         self.name = name
         self.temperature = temperature
@@ -370,19 +371,22 @@ class Sensor:
         self.ucr = ucr
         self.unr = unr
         self.type = type
+        self.ref_target = ref_target
 
-    @classmethod
     def getRelTemp(self) -> float:
         """
         Temperature relative to [lnc, unc] range.
         """
-        l: float = min(max(self.temperature, self.unc), self.lnc) - self.lnc
-        u: float = self.unc - self.lnc
-        r: float = l / u
-        return max(min(r, 1.0), 0.0) if r else 1.0
+        try:
+            ll = min(max(self.lnc + self.ref_target * (self.unc - self.lnc), self.lnc), self.unc)
+            l: float = min(max(self.temperature, ll), self.unc) - ll
+            u: float = self.unc - ll
+            return max(min(l / u, 1.0), 0.0) if not math.isnan(u) else 1.0
+        except:
+            return float('NaN')
 
     @staticmethod
-    def getIpmiTemps(ipmitool_path: str, sensor_spec: List[str], sensor_limits: Union[List[float], None] = None):
+    def getIpmiTemps(ipmitool_path: str, sensor_spec: List[str], ref_target: float, sensor_limits: Union[List[float], None] = None):
         """
         Get sensor list based on sensor_spec list from IPMI
         If sensor_limits is provided, it overwrites the IPMI limits
@@ -444,7 +448,8 @@ class Sensor:
                         lnc,
                         unc,
                         ucr,
-                        unr
+                        unr,
+                        ref_target
                     )
                 )
 
@@ -452,7 +457,7 @@ class Sensor:
 
     # TODO: Differentiate limits between SSD and HDD
     @staticmethod
-    def getDiskTemps(smartctl_path: str, parse_limits=False, limits_hdd=[10.0, 50.0], limits_ssd=[10.0, 70.0]):
+    def getDiskTemps(smartctl_path: str, ref_target: float, parse_limits=False, limits_hdd=[10.0, 50.0], limits_ssd=[10.0, 70.0]):
         def getDisks_FreeBSD():
             try:
                 disks = []
@@ -616,6 +621,7 @@ class Sensor:
                     unc,
                     ucr,
                     unr,
+                    ref_target,
                     disk['type']
                 )
             )
@@ -648,6 +654,7 @@ class FanController:
     polling: float          # Polling interval to read temperature (sec)
     min_level: int          # Minimum fan level (0..100%)
     max_level: int          # Maximum fan level (0..100%)
+    rel_target: float       # Relative target temperature
     sensors: List[Sensor]   # List of sensors
 
     # Measured or calculated attributes
@@ -662,7 +669,7 @@ class FanController:
 
     def __init__(
         self, log: Log, ipmi: Ipmi, ipmi_zone: int, name: str, temp_calc: int, steps: int,
-        sensitivity: float, polling: float, min_level: int, max_level: int) -> None:
+        sensitivity: float, polling: float, min_level: int, max_level: int, rel_target: float) -> None:
         """
         Initialize the FanController class. Will raise an exception in case of invalid parameters.
 
@@ -704,6 +711,11 @@ class FanController:
             raise ValueError('max_level < min_level')
         self.min_level = min_level
         self.max_level = max_level
+        self.rel_target = rel_target
+        if self.rel_target < 0.0:
+            raise ValueError('rel_target < 0.0')
+        if self.rel_target > 1.0:
+            raise ValueError('rel_target > 1.0')
 
         # Set the proper temperature function.
         if self.temp_calc == self.CALC_MIN:
@@ -720,9 +732,12 @@ class FanController:
         # Initialize calculated and measured values.
         self.temp_step = 1.0 / steps
         self.level_step = (max_level - min_level) / steps
-        self.last_temp = 0
+        self.last_temp = float('NaN')
         self.last_level = 0
         self.last_time = time.monotonic() - (polling + 1)
+
+        # Initial update
+        self.update_sensors()
 
         # Print configuration at DEBUG log level.
         if self.log.log_level >= self.log.LOG_DEBUG:
@@ -733,8 +748,12 @@ class FanController:
             self.log.msg(self.log.LOG_DEBUG, f'   polling = {self.polling}')
             self.log.msg(self.log.LOG_DEBUG, f'   min_level = {self.min_level}')
             self.log.msg(self.log.LOG_DEBUG, f'   max_level = {self.max_level}')
+            self.log.msg(self.log.LOG_DEBUG, f'   rel_target = {self.rel_target}')
+            self.log.msg(self.log.LOG_DEBUG, f'   sensor spec = {self.sensor_spec}')
+            self.log.msg(self.log.LOG_DEBUG, f'   sensor count = {len(self.sensors)}')
+
             for sensor in self.sensors:
-                self.log.msg(self.log.LOG_DEBUG, f'   sensor {sensor.name} = {sensor.temperature:.1f} ({sensor.getRelTemp():.3f})')
+                self.log.msg(self.log.LOG_DEBUG, f'      {sensor.name} = {sensor.temperature:.1f} {sensor.unit} [{sensor.lnc:.1f}, {sensor.unc:.1f}]')
 
     def update_sensors(self) -> None:
         """
@@ -753,7 +772,7 @@ class FanController:
             self.update_sensors()
             if len(self.sensors) > 0:
                 value = self.sensors[0].getRelTemp()
-                self.log.msg(self.log.LOG_DEBUG, f'{self.name} fan controller used relative temperature: FIRST = {(value * 100):.0f}% ({self.sensors[0].name}: {self.sensors[0].temperature:.1f} {self.sensors[0].unit})')
+                self.log.msg(self.log.LOG_DEBUG, f'{self.name} fan controller used temperature metric: FIRST = {(value * 100):.0f}% ({self.sensors[0].name}: {self.sensors[0].temperature:.1f} {self.sensors[0].unit})')
         except Exception as e:
             self.log.msg(self.log.LOG_ERROR, f'Error while reading temperature: {e}')
 
@@ -779,12 +798,12 @@ class FanController:
                         unit = sensor.unit
                     else:
                         v: float = sensor.getRelTemp()
-                        if v < value:
+                        if math.isnan(value) or v < value:
                             name = sensor.name
                             temp = sensor.temperature
                             unit = sensor.unit
-                        value = v
-                self.log.msg(self.log.LOG_DEBUG, f'{self.name} fan controller used temperature: MINIMUM = {(value * 100):.0f}% ({name}: {temp:.1f} {unit})')
+                            value = v
+                self.log.msg(self.log.LOG_DEBUG, f'{self.name} fan controller used temperature metric: MINIMUM = {(value * 100):.0f}% ({name}: {temp:.1f} {unit})')
         except Exception as e:
             self.log.msg(self.log.LOG_ERROR, f'Error while reading temperature: {e}')
 
@@ -802,14 +821,16 @@ class FanController:
                 cnt: int = 0
                 for sensor in self.sensors:
                     v: float = sensor.getRelTemp()
-                    if math.isnan(value):
-                        value = v
-                    elif not math.isnan(v):
-                        value += v
-                        cnt += 1
+                    if not math.isnan(v):
+                        if math.isnan(value):
+                            value = v
+                            cnt = 1
+                        else:
+                            value += v
+                            cnt += 1
                 if cnt > 0:
                     value = value / cnt
-            self.log.msg(self.log.LOG_DEBUG, f'{self.name} fan controller used temperature: AVERAGE = {(value * 100):.0f}%')
+            self.log.msg(self.log.LOG_DEBUG, f'{self.name} fan controller used temperature metric: AVERAGE = {(value * 100):.0f}%')
         except Exception as e:
             self.log.msg(self.log.LOG_ERROR, f'Error while reading temperature: {e}')
 
@@ -823,9 +844,6 @@ class FanController:
 
         try:
             self.update_sensors()
-            print('SensorCount:', len(self.sensors))
-            for sensor in self.sensors:
-                print(sensor.name, sensor.value)
             if len(self.sensors) > 0:
                 name: str
                 temp: float
@@ -833,20 +851,17 @@ class FanController:
                 for sensor in self.sensors:
                     if math.isnan(value):
                         value = sensor.getRelTemp()
-                        if (math.isnan(value)):
-                            print('NaN')
-                            continue
                         name = sensor.name
                         temp = sensor.temperature
                         unit = sensor.unit
                     else:
                         v: float = sensor.getRelTemp()
-                        if v > value:
+                        if math.isnan(value) or v > value:
                             name = sensor.name
                             temp = sensor.temperature
                             unit = sensor.unit
-                        value = v
-                self.log.msg(self.log.LOG_DEBUG, f'{self.name} fan controller used temperature: MAXIMUM = {(value * 100):.0f}% ({name}: {temp:.1f} {unit})')
+                            value = v
+                self.log.msg(self.log.LOG_DEBUG, f'{self.name} fan controller used temperature metric: MAXIMUM = {(value * 100):.0f}% ({name}: {temp:.1f} {unit})')
         except Exception as e:
             self.log.msg(self.log.LOG_ERROR, f'Error while reading temperature: {e}')
 
@@ -889,7 +904,7 @@ class FanController:
         current_temp = self.get_temp_func()
         if (math.isnan(current_temp)):
             print(f'ERROR: current_temp = {current_temp}')
-        if abs(current_temp - self.last_temp) < self.sensitivity:
+        if not math.isnan(self.last_temp) and abs(current_temp - self.last_temp) < self.sensitivity:
             return
         self.last_temp = current_temp
 
@@ -926,7 +941,7 @@ class CpuZone(FanController):
         """
 
         # Initialize sensors
-        self.sensor_spec = config[self.CPU_ZONE_TAG].get('sensor_spec')
+        self.sensor_spec = config[self.CPU_ZONE_TAG].get('sensor_spec').splitlines()
         self.ipmitool_path = config['Paths'].get('ipmitool_path', fallback='/usr/bin/ipmitool')
         self.limits = [
             config[self.CPU_ZONE_TAG].getfloat('min_temp', fallback=None),
@@ -944,11 +959,15 @@ class CpuZone(FanController):
             config[self.CPU_ZONE_TAG].getfloat('sensitivity', fallback=0.05),
             config[self.CPU_ZONE_TAG].getfloat('polling', fallback=2),
             config[self.CPU_ZONE_TAG].getint('min_level', fallback=35),
-            config[self.CPU_ZONE_TAG].getint('max_level', fallback=100)
+            config[self.CPU_ZONE_TAG].getint('max_level', fallback=100),
+            config[self.CPU_ZONE_TAG].getfloat('rel_target', fallback=0.3)
         )
 
+        if self.log.log_level >= self.log.LOG_DEBUG:
+            self.log.msg(self.log.LOG_DEBUG, f'   sensor spec = {self.sensor_spec}')
+
     def update_sensors(self) -> None:
-        self.sensors = Sensor.getIpmiTemps(self.ipmitool_path, self.sensor_spec, self.limits)
+        self.sensors = Sensor.getIpmiTemps(self.ipmitool_path, self.sensor_spec, self.rel_target, self.limits)
 
 class HdZone(FanController):
     """
@@ -976,7 +995,7 @@ class HdZone(FanController):
         """
 
         # Initialize sensors
-        self.sensor_spec = config[self.HD_ZONE_TAG].get('sensor_spec')
+        self.sensor_spec = config[self.HD_ZONE_TAG].get('sensor_spec').splitlines()
         self.ipmitool_path = config['Paths'].get('ipmitool_path', fallback='/usr/bin/ipmitool')
         self.smartctl_path = config['Paths'].get('smartctl_path', fallback='/usr/bin/smartctl')
         self.limits = [
@@ -1004,15 +1023,18 @@ class HdZone(FanController):
             config[self.HD_ZONE_TAG].getfloat('sensitivity', fallback=0.02),
             config[self.HD_ZONE_TAG].getfloat('polling', fallback=10),
             config[self.HD_ZONE_TAG].getint('min_level', fallback=35),
-            config[self.HD_ZONE_TAG].getint('max_level', fallback=100)
+            config[self.HD_ZONE_TAG].getint('max_level', fallback=100),
+            config[self.HD_ZONE_TAG].getfloat('rel_target', fallback=0.3)
         )
 
+        if self.log.log_level >= self.log.LOG_DEBUG:
+            sspec = ['Disks'] + self.sensor_spec
+            self.log.msg(self.log.LOG_DEBUG, f'   sensor spec = {sspec}')
+
     def update_sensors(self) -> None:
-        print('HD')
         self.sensors = \
-            Sensor.getIpmiTemps(self.ipmitool_path, self.sensor_spec, self.limits) + \
-            Sensor.getDiskTemps(self.smartctl_path, self.parse_limits, self.limits_hdd, self.limits_ssd)
-        print(self.sensors.count())
+            Sensor.getIpmiTemps(self.ipmitool_path, self.sensor_spec, self.rel_target, self.limits) + \
+            Sensor.getDiskTemps(self.smartctl_path, self.rel_target, self.parse_limits, self.limits_hdd, self.limits_ssd)
 
 def main():
     """
@@ -1119,12 +1141,18 @@ def main():
     my_log.msg(my_log.LOG_DEBUG, f'Main loop wait time = {wait} sec')
 
     # Main execution loop.
-    while True:
-        if cpu_zone_enabled:
-            my_cpu_zone.run()
-        if hd_zone_enabled:
-            my_hd_zone.run()
-        time.sleep(wait)
+    try:
+        while True:
+            if cpu_zone_enabled:
+                my_cpu_zone.run()
+            if hd_zone_enabled:
+                my_hd_zone.run()
+            time.sleep(wait)
+    except KeyboardInterrupt as e:
+        if my_ipmi and old_mode != my_ipmi.get_fan_mode():
+            my_log.msg(my_log.LOG_DEBUG, f'Restore IPMI fan mode = {my_ipmi.get_fan_mode_name(old_mode)}')
+            my_ipmi.set_fan_mode(old_mode)
+        sys.exit(130)
 
 
 if __name__ == '__main__':
