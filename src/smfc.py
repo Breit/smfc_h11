@@ -318,7 +318,7 @@ class Ipmi:
         try:
             if self.impi_alternate_mode:
                 subprocess.run(
-                    [self.command, 'raw', '0x30', '0x91', '0x5A', '0x03', str(hex(16 + zone)), str(hex((255 * level) / 100.0))],
+                    [self.command, 'raw', '0x30', '0x91', '0x5A', '0x03', str(hex(16 + zone)), str(hex(int(round((255 * level) / 100.0))))],
                     check=False,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL
@@ -772,7 +772,10 @@ class FanController:
             self.update_sensors()
             if len(self.sensors) > 0:
                 value = self.sensors[0].getRelTemp()
-                self.log.msg(self.log.LOG_DEBUG, f'{self.name} fan controller used temperature metric: FIRST = {(value * 100):.0f}% ({self.sensors[0].name}: {self.sensors[0].temperature:.1f} {self.sensors[0].unit})')
+                self.log.msg(
+                    self.log.LOG_DEBUG if value <= self.last_temp else self.log.LOG_INFO,
+                    f'{self.name} fan controller used temperature metric: FIRST = {(value * 100):.0f}% ({self.sensors[0].name}: {self.sensors[0].temperature:.1f} {self.sensors[0].unit})'
+                )
         except Exception as e:
             self.log.msg(self.log.LOG_ERROR, f'Error while reading temperature: {e}')
 
@@ -803,7 +806,10 @@ class FanController:
                             temp = sensor.temperature
                             unit = sensor.unit
                             value = v
-                self.log.msg(self.log.LOG_DEBUG, f'{self.name} fan controller used temperature metric: MINIMUM = {(value * 100):.0f}% ({name}: {temp:.1f} {unit})')
+                self.log.msg(
+                    self.log.LOG_DEBUG if value <= self.last_temp else self.log.LOG_INFO,
+                    f'{self.name} fan controller used temperature metric: MINIMUM = {(value * 100):.0f}% ({name}: {temp:.1f} {unit})'
+                )
         except Exception as e:
             self.log.msg(self.log.LOG_ERROR, f'Error while reading temperature: {e}')
 
@@ -830,7 +836,10 @@ class FanController:
                             cnt += 1
                 if cnt > 0:
                     value = value / cnt
-            self.log.msg(self.log.LOG_DEBUG, f'{self.name} fan controller used temperature metric: AVERAGE = {(value * 100):.0f}%')
+            self.log.msg(
+                self.log.LOG_DEBUG if value <= self.last_temp else self.log.LOG_INFO,
+                f'{self.name} fan controller used temperature metric: AVERAGE = {(value * 100):.0f}%'
+            )
         except Exception as e:
             self.log.msg(self.log.LOG_ERROR, f'Error while reading temperature: {e}')
 
@@ -861,7 +870,10 @@ class FanController:
                             temp = sensor.temperature
                             unit = sensor.unit
                             value = v
-                self.log.msg(self.log.LOG_DEBUG, f'{self.name} fan controller used temperature metric: MAXIMUM = {(value * 100):.0f}% ({name}: {temp:.1f} {unit})')
+                self.log.msg(
+                    self.log.LOG_DEBUG if value <= self.last_temp else self.log.LOG_INFO,
+                    f'{self.name} fan controller used temperature metric: MAXIMUM = {(value * 100):.0f}% ({name}: {temp:.1f} {unit})'
+                )
         except Exception as e:
             self.log.msg(self.log.LOG_ERROR, f'Error while reading temperature: {e}')
 
@@ -902,8 +914,6 @@ class FanController:
 
         # Step 2: read temperature and sensitivity gap.
         current_temp = self.get_temp_func()
-        if (math.isnan(current_temp)):
-            print(f'ERROR: current_temp = {current_temp}')
         if not math.isnan(self.last_temp) and abs(current_temp - self.last_temp) < self.sensitivity:
             return
         self.last_temp = current_temp
