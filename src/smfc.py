@@ -99,7 +99,8 @@ class Log:
         """
         syslog_level = syslog.LOG_ERR
         if level == self.LOG_INFO:
-            syslog_level = syslog.LOG_INFO
+            # syslog_level = syslog.LOG_INFO
+            syslog_level = syslog.LOG_NOTICE        # Log info messages with priority 'LOG_NOTICE' to get picked up by TrueNAS
         elif level == self.LOG_DEBUG:
             syslog_level = syslog.LOG_DEBUG
         return syslog_level
@@ -773,7 +774,7 @@ class FanController:
             if len(self.sensors) > 0:
                 value = self.sensors[0].getRelTemp()
                 self.log.msg(
-                    self.log.LOG_DEBUG if value <= self.last_temp else self.log.LOG_INFO,
+                    self.log.LOG_DEBUG,
                     f'{self.name} fan controller used temperature metric: FIRST = {(value * 100):.0f}% ({self.sensors[0].name}: {self.sensors[0].temperature:.1f} {self.sensors[0].unit})'
                 )
         except Exception as e:
@@ -807,7 +808,7 @@ class FanController:
                             unit = sensor.unit
                             value = v
                 self.log.msg(
-                    self.log.LOG_DEBUG if value <= self.last_temp else self.log.LOG_INFO,
+                    self.log.LOG_DEBUG,
                     f'{self.name} fan controller used temperature metric: MINIMUM = {(value * 100):.0f}% ({name}: {temp:.1f} {unit})'
                 )
         except Exception as e:
@@ -837,7 +838,7 @@ class FanController:
                 if cnt > 0:
                     value = value / cnt
             self.log.msg(
-                self.log.LOG_DEBUG if value <= self.last_temp else self.log.LOG_INFO,
+                self.log.LOG_DEBUG,
                 f'{self.name} fan controller used temperature metric: AVERAGE = {(value * 100):.0f}%'
             )
         except Exception as e:
@@ -871,7 +872,7 @@ class FanController:
                             unit = sensor.unit
                             value = v
                 self.log.msg(
-                    self.log.LOG_DEBUG if value <= self.last_temp else self.log.LOG_INFO,
+                    self.log.LOG_DEBUG,
                     f'{self.name} fan controller used temperature metric: MAXIMUM = {(value * 100):.0f}% ({name}: {temp:.1f} {unit})'
                 )
         except Exception as e:
@@ -926,7 +927,7 @@ class FanController:
         if current_level != self.last_level:
             self.last_level = current_level
             self.set_fan_level(current_level)
-            self.log.msg(self.log.LOG_INFO, f'{self.name}: new fan level > {current_level}% ({current_temp:.3f})')
+            self.log.msg(self.log.LOG_INFO, f'{self.name}: new fan level: {current_level}% (rel temp: {(current_temp * 100):.0f}%)')
 
 class CpuZone(FanController):
     """
@@ -1110,7 +1111,7 @@ def main():
     if not my_config or not my_config.read(my_results.config_file):
         my_log.msg(my_log.LOG_ERROR, f'Cannot load configuration file ({my_results.config_file})')
         sys.exit(6)
-    my_log.msg(my_log.LOG_DEBUG, f'Configuration file ({my_results.config_file}) loaded')
+    my_log.msg(my_log.LOG_INFO, f'Configuration file ({my_results.config_file}) loaded')
 
     # Create an Ipmi class instances and set required IPMI fan mode.
     try:
@@ -1119,23 +1120,23 @@ def main():
     except (ValueError, FileNotFoundError) as e:
         my_log.msg(my_log.LOG_ERROR, f'{e}.')
         sys.exit(7)
-    my_log.msg(my_log.LOG_DEBUG, f'Old IPMI fan mode = {my_ipmi.get_fan_mode_name(old_mode)}')
+    my_log.msg(my_log.LOG_INFO, f'Old IPMI fan mode = {my_ipmi.get_fan_mode_name(old_mode)}')
     if old_mode != my_ipmi.FULL_MODE:
         my_ipmi.set_fan_mode(my_ipmi.FULL_MODE)
-        my_log.msg(my_log.LOG_DEBUG, f'New IPMI fan mode = {my_ipmi.get_fan_mode_name(my_ipmi.FULL_MODE)}')
+        my_log.msg(my_log.LOG_INFO, f'New IPMI fan mode = {my_ipmi.get_fan_mode_name(my_ipmi.FULL_MODE)}')
 
     # Create an instance for CPU zone fan controller if enabled.
     my_cpu_zone = None
     cpu_zone_enabled = my_config['CPU zone'].getboolean('enabled', fallback=False)
     if cpu_zone_enabled:
-        my_log.msg(my_log.LOG_DEBUG, 'CPU zone fan controller enabled')
+        my_log.msg(my_log.LOG_INFO, 'CPU zone fan controller enabled')
         my_cpu_zone = CpuZone(my_log, my_ipmi, my_config)
 
     # Create an instance for HD zone fan controller if enabled.
     my_hd_zone = None
     hd_zone_enabled = my_config['HD zone'].getboolean('enabled', fallback=False)
     if hd_zone_enabled:
-        my_log.msg(my_log.LOG_DEBUG, 'HD zone fan controller enabled')
+        my_log.msg(my_log.LOG_INFO, 'HD zone fan controller enabled')
         my_hd_zone = HdZone(my_log, my_ipmi, my_config)
 
     # Calculate the default sleep time for the main loop.
@@ -1160,7 +1161,7 @@ def main():
             time.sleep(wait)
     except KeyboardInterrupt as e:
         if my_ipmi and old_mode != my_ipmi.get_fan_mode():
-            my_log.msg(my_log.LOG_DEBUG, f'Restore IPMI fan mode = {my_ipmi.get_fan_mode_name(old_mode)}')
+            my_log.msg(my_log.LOG_INFO, f'Restore IPMI fan mode = {my_ipmi.get_fan_mode_name(old_mode)}')
             my_ipmi.set_fan_mode(old_mode)
         sys.exit(130)
 

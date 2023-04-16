@@ -1,0 +1,7 @@
+#!/bin/bash
+
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+USER=root
+
+# check if server is running and start it if not
+pgrep -f smfc > /dev/null || su -m $USER -c "python $SCRIPT_DIR/smfc.py -c $SCRIPT_DIR/smfc.conf -l 2 -o 2 &"
