@@ -3,5 +3,26 @@
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 USER=root
 
-# check if server is running and start it if not
+# check if server is running and stop it if it is running
+PID=$(pgrep -f smfc)
+CNT=0
+TIMEOUT=60	# timeout for the service to stop
+
+if [ ! -z "$PID" ]
+then
+    kill -2 $PID
+
+    while [ $CNT -le $TIMEOUT ]
+    do
+	sleep 1
+        if [ -z "$PID" ]
+	then
+		echo "Stopped after: $CNT"
+        	CNT=$TIMEOUT
+	fi
+	: $((CNT++)) # Increment counter
+    done
+fi
+
+# start service
 pgrep -f smfc > /dev/null || su -m $USER -c "python $SCRIPT_DIR/smfc.py -c $SCRIPT_DIR/smfc.conf -l 2 -o 2 &"
