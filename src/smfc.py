@@ -22,6 +22,7 @@ import configparser
 import platform
 import re
 import subprocess
+import signal
 import sys
 import syslog
 import time
@@ -29,7 +30,10 @@ import math
 from typing import List, Callable, Union
 
 # Program version string
-version_str: str = '0.1.0'
+version_str: str = '0.1.1'
+
+# Abort signal
+abort: bool = False
 
 def str2float(str)-> float:
     try:
@@ -200,6 +204,7 @@ class Ipmi:
         self.fan_level_delay = config['Ipmi'].getint('fan_level_delay', fallback=2)
         self.swapped_zones = config['Ipmi'].getboolean('swapped_zones', fallback=False)
         self.impi_alternate_mode = config['Ipmi'].getboolean('impi_alternate_mode', fallback=False)
+        self.use_impi_full_fan_mode = config['Ipmi'].getboolean('use_impi_full_fan_mode', fallback=True)
 
         # Validate configuration
         # Check 1: a valid command can be executed successfully.
@@ -1051,6 +1056,12 @@ def main():
     """
     Main function: starting point of the systemd service.
     """
+
+    # Define a simple signal handler
+    def signal_handler(sig, frame):
+        global abort
+        abort = True
+
     my_parser: argparse.ArgumentParser      # Instance for an ArgumentParser class
     my_results: argparse.Namespace          # Results of parsed command line arguments
     my_config: configparser.ConfigParser    # Instance for a parsed configuration
@@ -1061,6 +1072,9 @@ def main():
     old_mode: int                           # Old IPMI fan mode
     cpu_zone_enabled: bool                  # CPU zone fan controller enabled
     hd_zone_enabled: bool                   # HD zone fan controller enabled
+
+    # Register abort signal handler
+    signal.signal(signal.SIGINT, signal_handler)
 
     # Parse the command line arguments.
     my_parser = argparse.ArgumentParser()
@@ -1120,10 +1134,13 @@ def main():
     except (ValueError, FileNotFoundError) as e:
         my_log.msg(my_log.LOG_ERROR, f'{e}.')
         sys.exit(7)
-    my_log.msg(my_log.LOG_INFO, f'Old IPMI fan mode = {my_ipmi.get_fan_mode_name(old_mode)}')
-    if old_mode != my_ipmi.FULL_MODE:
-        my_ipmi.set_fan_mode(my_ipmi.FULL_MODE)
-        my_log.msg(my_log.LOG_INFO, f'New IPMI fan mode = {my_ipmi.get_fan_mode_name(my_ipmi.FULL_MODE)}')
+    if my_ipmi.use_impi_full_fan_mode:
+        my_log.msg(my_log.LOG_INFO, f'Old IPMI fan mode = {my_ipmi.get_fan_mode_name(old_mode)}')
+        if old_mode != my_ipmi.FULL_MODE:
+            my_ipmi.set_fan_mode(my_ipmi.FULL_MODE)
+            my_log.msg(my_log.LOG_INFO, f'New IPMI fan mode = {my_ipmi.get_fan_mode_name(my_ipmi.FULL_MODE)}')
+    else:
+        my_log.msg(my_log.LOG_INFO, f'IPMI fan mode = {my_ipmi.get_fan_mode_name(old_mode)}')
 
     # Create an instance for CPU zone fan controller if enabled.
     my_cpu_zone = None
@@ -1154,6 +1171,9 @@ def main():
     # Main execution loop.
     try:
         while True:
+            if abort:
+                my_log.msg(my_log.LOG_INFO, 'ABORT signal received. Shutting down...')
+                break
             if cpu_zone_enabled:
                 my_cpu_zone.run()
             if hd_zone_enabled:
@@ -1164,7 +1184,6 @@ def main():
             my_log.msg(my_log.LOG_INFO, f'Restore IPMI fan mode = {my_ipmi.get_fan_mode_name(old_mode)}')
             my_ipmi.set_fan_mode(old_mode)
         sys.exit(130)
-
 
 if __name__ == '__main__':
     main()
